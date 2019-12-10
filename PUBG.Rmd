@@ -1,0 +1,635 @@
+---
+title: "How to Survive in PlayerUnkown's Battlegrounds (PUBG)"
+author: "Chen Yiran (Becky)"
+date: "12/06/2019"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tinytex)
+library(ggplot2)
+library(tinytex)
+library(tidyverse)
+library(dplyr)
+library(lattice)
+library(rms)
+library(gridExtra)
+library(arm)
+library(caret)
+library(pROC)
+library(car)
+library(kableExtra)
+library(broom)
+library(readxl)
+library(e1071)
+library(sets)
+library(DMwR)
+library(tree)
+library(randomForest)
+library(GGally)
+library(brms)
+library(sjPlot)
+library(xtable)
+library(data.table)
+library(glmnet)
+library(ISLR)
+library(gbm)
+library(MLmetrics)
+library(formula.tools)
+library(rlist)
+library(RcmdrMisc)
+```
+
+* * *
+
+# Summary
+
+This project aims to analyze user post-game statistics of a popular shooting game PlayerUnknown's Battlegrounds (PUBG) in order to see what factors and to what extent they would affect whether or not the team gets into the top ten percentile (defined as winning) in a game for squad team players. From that, some winning strategies for actions are proposed. By using logistic regression, it is found out that the cooperation among teammates is essential, giving one or more assists or revives of teammates greatly increases the odds of winning. On top of that, having a more aggressive strategy to eliminate the enemies is better than "playing it safe" and hiding. Compared to average, having more number of kills or enemies knocked down and higher headshot accuracy than average would increase the odds of winning. Using more boosting items than average is advantageous which speeds up player's movement. Therefore it is good idea to keep full booster meter both for attack and defend whenever possible. 
+
+
+# Introduction
+
+In each match of PUBG, there are around 100 players, i.e. 25 squad groups, parachute onto an island and scavenge for weapons to kill while avoid being killed for each match. The available moving area of the game shrinks in size periodically, forcing players to face each other over time and eliminating those who are falling too far out. The players are free to use different weapons to cause damages, ride vehicles, run or swim, shoot, and revive down-but-not-out (knocked) teammates. The winning placement percentile for every group member remains the same. As long as there is one member standing, all group members win the battle as the same first ranking.
+
+The project aims to analyze user post-game statistics across different matches to reveal better gaming strategies to increase the chance of winning as the last one standing group using logistic regressions. Targeted specifically at players in squad match types, the average game statistics for players in a group are examined. In order to have an accurate reflection of the average player performance, several new features apart from given covariates are created and investigated to identify cheaters which are to be deleted. The factors which greatly affects the chance of winning will be identified and quantified, from which better game strategies will be suggested.
+
+
+# Data
+
+The data is obtained from Kaggle competition where each row each row contains one player's post-game statistics for each group he or she belongs to in each match (https://www.kaggle.com/c/pubg-finish-placement-prediction/data). 
+
+The raw dataset used contains 4,446,966 rows and 25 attributes (Appendix 1). This is then filtered by squad match type. By removing misleading or deprecated game metrics, the original predictors include: *assists*, *boosts*, *damageDealt*, *DBNOs*, *headshotKills*, *heals*, *kills*, *killStreaks*, *numGroups*, *revives*, *rideDistance*, *roadKills*, *swimDistance*, *teamKills*, *vehicleDestroys*, *walkDistance*, *weaponsAcquired*. 
+
+After checking with no missing values in the dataset, new features are created in order to identify possible cheaters and provide more insights, including sum of number of kills and number of knocked-down enemies (*killsandknocked*) as a refelction of the aggressiveness of the player, total distance traveled (*totalDistance*), the accuracy rate of giving headshot (*headshot_rate*, where players with 0 kills are counted as 0). 
+
+Some possible cheating behaviors were spotted and such player records along with that team records were then discarded: There is one player who achieved more than 30 kills in a single match, 3 had kills without any moving distances, and 2 obtained more than 80 weapons. Players with 100% headshot accuracy might seem suspicious as cheaters, however, they could be simply really good players and therefore were not removed. There are also some players who have three or four teammate kills which seem dubious but were kept for some eccentric playing style.
+
+After removal of potential cheater records, the interested variables are aggregated by each user's respective group and respective match by taking the mean value of members in that group for that match. This is because the fact that each group is able to attend multiple matches, i.e. one group can win in one match but lose in another. Therefore it would be most reasonable to separate both situations as data input by grouping by groupId and matchId at the same time. There are 177,079 rows left after aggregation. It is then randomly sampled to have 10,000 records as the dataset in the following analysis. The outcome variable is created as 1 when winning placement percentile equals 1, and 0 otherwise.
+
+
+```{r dataProcessing, include=F}
+setwd('/Users/yiran/Desktop/IDS702-Modeling/pubg/pubg')
+pubg_full = read_csv('train_V2.csv')
+pubg_sqd = pubg_full[pubg_full$matchType=='squad',] # select matchType of interest: squad
+pubg_sqd = subset(pubg_sqd, select=-c(rankPoints,longestKill,matchType,matchDuration,maxPlace, killStreaks, killPlace, killPoints)) # remove unneccessary predictors
+#unique(is.na(pubg_sqd)) # check no missing
+
+# Create feature healsandboosts
+pubg_sqd$healsandboosts = pubg_sqd$heals + pubg_sqd$boosts
+# Create feature totalDistance
+pubg_sqd$totalDistance = pubg_sqd$walkDistance + pubg_sqd$rideDistance + pubg_sqd$swimDistance
+# Create feature killsWithoutMoving
+pubg_sqd$killsWithoutMoving = FALSE
+pubg_sqd$killsWithoutMoving[(pubg_sqd$kills > 0) & (pubg_sqd$totalDistance == 0)] = TRUE
+# Create feature headshot_rate
+pubg_sqd$headshot_rate = pubg_sqd$headshotKills / pubg_sqd$kills
+pubg_sqd$headshot_rate[is.na(pubg_sqd$headshot_rate)] <- 0 # ppl with 0 kills counted as 0 headshot_rate
+
+# Cheaters to delete
+# kills over 30
+pubg_sqd[pubg_sqd$kills >= 30,] #nrow=626526
+pubg_sqd <- subset(pubg_sqd, Id !="7614924933b454")  # remove 1 Id, nrow=626525
+# killsWithoutMoving
+pubg_sqd[pubg_sqd$killsWithoutMoving==TRUE,] # remove 3 Id, nrow=626522
+pubg_sqd <- subset(pubg_sqd, Id !="57616463953c27" & Id!="0c9e9c8238c9ad" & Id!="112743f79f7b52") 
+# over10roadKills
+pubg_sqd[pubg_sqd$roadKills > 10,] # None
+# 100% headshot accuracy (not sure, probably not delete)
+pubg_sqd[pubg_sqd$headshot_rate==1,] #33150 Ids
+unique(pubg_sqd$groupId[pubg_sqd$headshot_rate==1])
+# excessive weapons >80
+pubg_sqd[pubg_sqd$weaponsAcquired >= 80,] # remove 2 Id, nrow=626520
+pubg_sqd <- subset(pubg_sqd, Id !="c58e3e0c2ba678" & Id!="e927e9020f7e0d")
+# teamKills
+pubg_sqd[pubg_sqd$teamKills >= 3,] #251 Id who killed 3 or 4 teammates - not removed yet
+
+pubg_sqd = subset(pubg_sqd, select=-c(Id))
+# aggregate by groupId, matchId to evaluate performance for each group per match
+pubg_sqd_agg = pubg_sqd %>%
+  group_by(groupId, matchId) %>%
+  summarise_each(funs(mean))
+# account for how many matches each group played (n: nunmber of matches each group has played)
+#count = pubg_sqd %>% count(groupId, matchId)
+#df <- inner_join(pubg_sqd_agg, count) # merge with (groupId, matchId)
+```
+
+
+```{r dataProcessing2, include=F}
+df = pubg_sqd_agg
+df <- df[sample(nrow(df), 10000), ]
+
+df$killsandknocked = df$kills + df$DBNOs
+
+# build outcome variable
+df$outcome = 0
+df$outcome[df$winPlacePerc >= 0.9] = 1
+#table(df$outcome,df$n)
+
+df$assistsc = df$assists - mean(df$assists)
+df$boostsc = df$boosts - mean(df$boosts)
+df$killsandknockedc = df$killsandknocked - mean(df$killsandknocked)
+df$headshotKillsc = df$headshotKills - mean(df$headshotKills)
+df$healsc = df$heals - mean(df$heals)
+df$killsc = df$kills - mean(df$kills)
+df$revivesc = df$revives - mean(df$revives)
+df$rideDistancec = df$rideDistance - mean(df$rideDistance)
+df$roadKillsc = df$roadKills - mean(df$roadKills)
+df$swimDistancec = df$swimDistance - mean(df$swimDistance)
+df$teamKillsc = df$teamKills - mean(df$teamKills)
+df$vehicleDestroysc = df$vehicleDestroys - mean(df$vehicleDestroys)
+df$walkDistancec = df$walkDistance - mean(df$walkDistance)
+df$weaponsAcquiredc = df$weaponsAcquired - mean(df$weaponsAcquired)
+df$winPointsc = df$winPoints - mean(df$winPoints)
+df$healsandboostsc = df$healsandboosts - mean(df$healsandboosts)
+df$totalDistancec = df$totalDistance - mean(df$totalDistance)
+df$headshot_ratec = df$headshot_rate - mean(df$headshot_rate)
+df$numGroupsc = df$numGroups - mean(df$numGroups)
+
+df$assists_bi = 0
+df$assists_bi[df$assists > 0] =1
+
+df$revives_bi = 0
+df$revives_bi[df$revives > 0] = 1
+
+df$teamKills_bi = 0
+df$teamKills_bi[df$teamKills > 0] =1
+
+df$roadKills_bi = 0
+df$roadKills_bi[df$roadKills > 0]=1
+
+df$vehicleDestroys_bi = 0
+df$vehicleDestroys_bi[df$vehicleDestroys > 0]=1
+
+df$winPoints_bi = 0
+df$winPoints_bi[df$winPoints > 0]=1
+
+# # training/test set split
+# set.seed(123)
+# train_ind <- createDataPartition(factor(df$outcome), p = 0.80, list = FALSE)
+# train=df[train_ind,]
+# test=df[-train_ind,]
+```
+
+
+```{r removeOutlier, echo=F, include=F, eval=F}
+#df = df[df$numGroups<=30,] #remove 187 outliers
+#df = df[df$killsandknockedc > 10,] #remove 139 outliers
+#df = df[df$headshot_rate<=0.8,] #remove 94 outliers
+#now nrow(df)=9584
+```
+
+### Transformation
+
+Most data of *assists*, *revives*, *teamKills*, *roadKills*, and *vehicleDestroys* are clustered around small values with limited range. These predictors are made into categorical variables of having 0 values or not. All the continuous variables are all mean centered in order to give results compared to an average player, denoted with a letter c at the end of variable name. 
+
+
+# EDA
+
+For categorical variables, chi-squared tests were conducted, and it shows that whether or not providing assists to teammates, whether or not helping to revive teammates, whether or not the player chooses to kill any teammates, and whether there kills in a vehicle, are all significant for the outcome. On the other hand, whether or not the player chooses to destroy any vehicles is not significant.
+
+
+```{r categorical_chitest, echo=F, include=F, eval=FALSE}
+# outcome vs assists_bi
+table(df[,c("outcome","assists_bi")])/sum(table(df[,c("outcome","assists_bi")]))
+apply(table(df[,c("outcome","assists_bi")])/sum(table(df[,c("outcome","assists_bi")])),
+      2,function(x) x/sum(x)) 
+chisq.test(table(df[,c("outcome","assists_bi")]))
+
+# outcome vs revives_bi 
+table(df[,c("outcome","revives_bi")])/sum(table(df[,c("outcome","revives_bi")]))
+chisq.test(table(df[,c("outcome","revives_bi")]))
+
+# outcome vs teamKills_bi
+table(df[,c("outcome","teamKills_bi")])/sum(table(df[,c("outcome","teamKills_bi")]))
+chisq.test(table(df[,c("outcome","teamKills_bi")]))
+
+# outcome vs vehicleDestroys_bi
+table(df[,c("outcome","vehicleDestroys_bi")])/sum(table(df[,c("outcome","vehicleDestroys_bi")]))
+apply(table(df[,c("outcome","vehicleDestroys_bi")])/sum(table(df[,c("outcome","vehicleDestroys_bi")])),2,function(x) x/sum(x)) 
+chisq.test(table(df[,c("outcome","vehicleDestroys_bi")]))
+
+# outcome vs roadKills_bi
+table(df[,c("outcome","roadKills_bi")])/sum(table(df[,c("outcome","roadKills_bi")]))
+chisq.test(table(df[,c("outcome","roadKills_bi")]))
+
+```
+
+```{r EDAbinplots, fig.height=4, fig.width=8, echo=FALSE, include=FALSE, eval=FALSE}
+par(mfrow = c(2,4))
+# outcome vs killsandknockedc
+binnedplot(y=df$outcome,df$killsandknockedc,xlab="killsandknockedc",
+           col.pts="navy",ylab ="Win or Lose?",
+           main=NA,col.int="white")
+
+# outcome vs numGroupsc
+binnedplot(y=df$outcome,df$numGroupsc,xlab="numGroupsc",
+           ylim=c(0,0.18),col.pts="navy",ylab ="Win or Lose?",
+           main=NA,col.int="white")
+
+# outcome vs headshotKillsc
+binnedplot(y=df$outcome,df$headshot_ratec,xlab="headshotKillsc",
+           col.pts="navy",ylab ="Win or Lose?",
+           main=NA,col.int="white")
+
+# outcome vs healsc
+binnedplot(y=df$outcome,df$healsc,xlab="healsc",
+           col.pts="navy",ylab ="Win or Lose?",
+           main=NA,col.int="white")
+# outcome vs boostsc
+binnedplot(y=df$outcome,df$boostsc,xlab="boostsc",
+           col.pts="navy",ylab ="Win or Lose?",
+           main=NA,col.int="white")
+
+# outcome vs headshotKillsc
+binnedplot(y=df$outcome,df$headshot_ratec,xlab="headshotKillsc",
+           col.pts="navy",ylab ="Win or Lose?",
+           main=NA,col.int="white")
+# outcome vs weaponsAcquiredc
+binnedplot(y=df$outcome,df$weaponsAcquiredc,xlab="weaponsAcquiredc",
+           col.pts="navy",ylab ="Win or Lose?",
+           main=NA,col.int="white")
+```
+
+From binned plots of continuous variables, there seem to have positive trend with all the game statistics except number of groups participated in each match. Such results were also supported by boxplots where it can be seen that most non-winning players are mostly clustered below the average in all predictors while winning players tend to have higher values and means in both kills, distance traveled, healing and boosting items used, accuracy of giving headshots, and the number of weapons acquired.
+
+```{r EDAboxplots, fig.height=4, fig.width=8, echo=F, include=F,eval=F}
+# killsandknockedc
+g1=ggplot(df, aes(y=killsandknockedc, x=factor(outcome), fill=factor(outcome)))+
+  geom_violin() +geom_boxplot(width=0.05)+ xlab('outcome') + ylab('killsandknockedc')+ theme(legend.position = "none")
+# numGroupsc
+g2=ggplot(df, aes(y=numGroupsc, x=factor(outcome), fill=factor(outcome)))+
+  geom_violin() +geom_boxplot(width=0.05) + xlab('outcome') + ylab('numGroups')+ theme(legend.position = "none")
+# headshot_ratec
+g3=ggplot(df, aes(y=headshot_ratec, x=factor(outcome), fill=factor(outcome)))+
+  geom_violin() +geom_boxplot(width=0.05) + xlab('outcome') + ylab('headshot_ratec') + theme(legend.position = "none")
+#healsc
+g4=ggplot(df, aes(y=healsc, x=factor(outcome), fill=factor(outcome)))+
+  geom_violin() +geom_boxplot(width=0.05) + xlab('outcome') + ylab('healsc') + theme(legend.position = "none")
+#boostsc
+g5=ggplot(df, aes(y=boostsc, x=factor(outcome), fill=factor(outcome)))+
+  geom_violin() +geom_boxplot(width=0.05) + xlab('outcome') + ylab('boostsc') + theme(legend.position = "none")
+#weaponsAcquiredc
+g6=ggplot(df, aes(y=weaponsAcquiredc, x=factor(outcome), fill=factor(outcome)))+
+  geom_violin() +geom_boxplot(width=0.05) + xlab('outcome') + ylab('weaponsAcquiredc') + theme(legend.position = "none")
+
+grid.arrange(g1,g2,g3,g4,g5,g6,ncol=2)
+
+# ggplot(df, aes(y=heals, x=factor(outcome), fill=factor(outcome)))+
+#   geom_violin() +geom_boxplot(width=0.05) + xlab('outcome') + ylab('heals') + theme(legend.position = "none")
+```
+
+
+```{r EDA_interactions, include=F,eval=FALSE}
+# assists_bi and killsandknocked
+par(mfrow=c(1,2))
+boxplot(killsandknockedc~outcome,data=df,subset= assists_bi==0,ylab="killsandknocked",
+        xlab="Outcome",col=c("red3","yellow3"),xaxt='n',
+        pch = 25, cex = 0.85,main ="assists_bi=0")
+axis(1,at=c(1,2),labels=c("0","1"))
+
+boxplot(killsandknockedc~outcome,data=df,subset= assists_bi==1,ylab="killsandknocked",
+        xlab="Outcome",col=c("red3","yellow3"),xaxt='n',
+        pch = 25, cex = 0.85,main ="assists_bi=1")
+axis(1,at=c(1,2),labels=c("0","1"))
+```
+
+Regarding interactions, it also seems that whether or not giving assists to teammates will affect how *killsandknocked* resulting in getting into top ten percentile of a game. Naturally by providing assists to teammates, the player helps his or her teammates to live longer, and therefore the chance of winning as a group is larger.
+
+```{r corr, out.width='100%',fig.align='center', wanings = F, message=F, comment = NA, include=F, eval=F}
+df_var = df
+#df_var = subset(df, select = c(assists_bi, healsc, boostsc, revives_bi, teamKills_bi, roadKills_bi, roadKills_bi, weaponsAcquiredc, killsandknockedc, numGroups, totalDistancec, headshot_ratec))
+# Correlation
+corr <- df_var %>%
+  sapply(., as.numeric) %>%
+  as.data.table()
+corr <- cor(corr, use = 'pairwise.complete.obs')
+corr[upper.tri(corr)] <- NA
+corr <- melt(corr, na.rm = T) %>% as.data.table() %>% setorder(-value)
+corr$text <- ifelse(abs(corr$value) >= .8 & corr$value != 1, round(corr$value, 2), '')
+
+# plot correlation matrix
+corr_plot = ggplot(data = corr, aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile(color = 'white') +
+  geom_text(aes(label = text)) +
+  scale_fill_gradient2(low = 'blue', high = 'red', mid = 'white',
+                       midpoint = 0, limit = c(-1, 1),
+                       name = 'Pearson Correlation') +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = 'Correlation Matrix')
+corr_plot
+```
+
+### Variable Selection
+
+It was found out from the correlation matrix that some noticeable variable pairs which are highly correlated: *kills* and *killStreaks*; *kills* and *damageDealt* and *DBNOs*. As the max number of enemy players killed in a short amount of time (*killStreaks*) is directly linked to the number of successful kills, it is more reasonable to focus on the total amount of kills in a match instead of targeting at a short period of time. It is very likely for a player who have battled, knocked or killed more enemies to receive more damages. The number of enemies getting knocked is directly associated with the number of enemies killed. From the three original predictors, *killsandknocked* is chosen to be included as a measure of player aggressiveness. On the other hand, the total distance traveled (*totalDistance*) is not a suitable metric to be included in the model, as it is largely determined by external factor of the team location with regard to a randomly generated player zone which continually shrinks by time. Specifically, a player will continuously receive damages if caught outside the circle and therefore need to move more to get inside. If he or she luckily lands within the circle already then the moving distance will be significantly reduced. As the data is averaged by team, the effect of this external factor on distance will hinder the true relationship and not appropriate to include for the purpose of the project.
+
+
+# Model
+
+### Model Building Process
+
+The methodology adopted in the model building was initialized by including all categorical variables, mean-centered numeric variables, and the interaction between *assists_bi* and *killsandknocked*. In this full scope model, *vehicleDestroys_bi* and *roadKills_bi* were found not significant, while the interaction term was found significant. These are also supported by ANOVA tests comparing models which add one term at a time. The full model is put through stepwise selection with AIC as the judgement criteria for model fit. 
+
+
+```{r logi_original, echo=F,include=F, message=F, warning=F, comment=NA}
+# Logistic - cannot do hieratical due to cross overlap of groupIds and matchIds
+# all indiv var
+reg1 = glm(outcome ~ assists_bi + healsc + boostsc+ revives_bi+teamKills_bi+vehicleDestroys_bi+roadKills_bi+weaponsAcquiredc+
+             killsandknockedc+numGroupsc+headshot_ratec, 
+           data = df, family = binomial(link="logit"))
+
+# all indiv var + assists:kills [FULL SCOPE]
+reg1a = glm(outcome ~ assists_bi + healsc + boostsc+ revives_bi+teamKills_bi+vehicleDestroys_bi+roadKills_bi+weaponsAcquiredc+
+             killsandknockedc+numGroupsc+headshot_ratec+
+             assists_bi:killsandknockedc, 
+           data = df, family = binomial(link="logit"))
+anova(reg1, reg1a, test= "Chisq")
+
+# all indiv var + assists:kills + assists:headshot_rate
+reg1b = glm(outcome ~ assists_bi + healsc + boostsc+ revives_bi+teamKills_bi+vehicleDestroys_bi+roadKills_bi+weaponsAcquiredc+
+             killsandknockedc+numGroupsc+headshot_ratec+
+             assists_bi:killsandknockedc+ assists_bi:headshot_ratec, 
+           data = df, family = binomial(link="logit"))
+anova(reg1a, reg1b, test= "Chisq") # not significant
+
+# stepwise from 1a
+reg2 = step(reg1a,scope=reg1a,direction = "both",trace=0) #AIC-both lower
+#reg2 = stepwise(reg1a,direction = "backward",criterion = "BIC",trace=0) #BIC-backwoard lower
+summary(reg2)
+
+
+# reg3 = glm(outcome ~ assists_bi + healsc + boostsc+ revives_bi+teamKills_bi+vehicleDestroys_bi+roadKills_bi+winPoints_bi+weaponsAcquiredc+
+#              killsandknockedc+numGroups+
+#              assists_bi:killsandknockedc, 
+#     family = binomial(link = "logit"), data = df)
+# anova(reg2, reg3, test= "Chisq")
+
+```
+
+
+```{r glm_table, warnings=F, messages=F, echo=F, include=F, comment=NA}
+# glm_table <-data.frame(c("all indiv", "all indiv+interaction","stepwise result"),
+#                        rep(0,3), rep(0,3),rep(0,3),rep(0,3),
+#                        rep(0,3),rep(0,3),rep(0,3),rep(0,3),
+#                        rep(0,3),rep(0,3),rep(0,3),rep(0,3))
+# colnames(glm_table) <- c("Model","AIC","BIC","Threshold",
+#                          "AUC_train","Accuracy_train","Sensitivity_train","Specificity_train",
+#                          "AUC_test","Accuracy_test","Sensitivity_test","Specificity_test")
+glm_table <-data.frame(c("all indiv", "all indiv+interaction", "stepwise result"),
+                       rep(0,3), rep(0,3),rep(0,3),rep(0,3),
+                       rep(0,3),rep(0,3),rep(0,3),rep(0,3))
+colnames(glm_table) <- c("Model","AIC","BIC","Threshold",
+                         "AUC","Accuracy","Sensitivity","Specificity")
+
+formula_list = c(reg1$formula, reg1a$formula, reg2$formula)
+
+for (formula in formula_list) {
+  index = match(c(formula), formula_list)
+  #glm_table$Formula[index] <- as.character(formula)
+  # Regression Results 
+  model_i <- glm(formula, family=binomial(link="logit"),data=df)
+  # model <- list.append(model, model_i)
+  # summary <- list.append(summary, summary(model_i))
+  #tab_model <- list.append(tab_model, tab_model(model_i))
+  # AIC, BIC
+  glm_table$AIC[index] <- AIC(model_i)
+  glm_table$BIC[index] <- BIC(model_i)
+  
+  # ROC, AUC
+  roc_i <- roc(df$outcome,predict(model_i,type="response",newdata=df),
+                     plot=F,print.thres="best",legacy.axes=T,print.auc =F,col="red3")
+  glm_table$AUC[index] <- as.numeric(roc_i$auc)
+
+  # roc_test_i <- roc(test$outcome,predict(model_i,type="response",newdata=test),
+  #                   plot=F,print.thres="best",legacy.axes=T,print.auc =F,col="red3")
+  # glm_table$AUC_test[index] <- as.numeric(roc_test_i$auc)
+  
+  # Threshold, Accuracy, Sensitivity, Specificity
+  glm_table$Threshold[index] <- 0.3
+  Conf_mat <- confusionMatrix(as.factor(ifelse(predict(model_i,type="response",newdata=df)>0.3,"1","0")),as.factor(df$outcome),positive = "1")
+  glm_table$Accuracy[index] <- Conf_mat$overall["Accuracy"]
+  glm_table$Sensitivity[index] <- Conf_mat$byClass[c("Sensitivity")]
+  glm_table$Specificity[index] <- Conf_mat$byClass[c("Specificity")]
+
+  # Conf_mat_test <- confusionMatrix(as.factor(ifelse(predict(model_i,type="response",newdata=test)>0.3,"1","0")),as.factor(test$outcome),positive = "1")
+  # glm_table$Accuracy_test[index] <- Conf_mat$overall["Accuracy"]
+  # glm_table$Sensitivity_test[index] <- Conf_mat$byClass[c("Sensitivity")]
+  # glm_table$Specificity_test[index] <- Conf_mat$byClass[c("Specificity")]
+
+}
+
+
+glm_table = subset(glm_table,select = -c(9))
+#glm_table
+```
+
+
+```{r glm_table_out, warnings=F, messages=F, echo=F, include=T, comment=NA}
+kable(glm_table, "latex",caption = "Logistic Models",booktabs = T,linesep = "") %>%
+kable_styling(position = "center",latex_options = "hold_position")%>%
+kable_styling(latex_options = c("repeat_header"))%>%
+column_spec(1, width = "4cm")
+```
+
+
+### Final Model
+
+The final model can predict the true positives and true negatives proportionally with an overall accuracy of 89.4%. The sensitivity and specificity with threshold 0.3 suggest that the model is 55.0% correct at identifying true positives (i.e. winning teams that made into top 10 percentile), and 93.8% correct identifying true negatives who did not made it.
+
+$$logit(Pr[outcome=1]) = \beta_0 + \beta_{1} {assists\_bi_i} + \beta_{2} {heals\_bi_i} + \beta_{3} {boostsc_i} + \beta_{4} {revives\_bi_i} $$
+$$+ \beta_{5} {teamKills\_bi_i} +  \beta_{6} {weaponsAcquiredc_i} + \beta_{7} {killsandknockedc_i} + \beta_{8} {numGroupsc_i}$$ 
+$$+ \beta_{9} {headshot_ratec_i}+ \beta_{10} {assists\_bi_i:killsandknockedc_i}+ \epsilon_i$$
+$$\ \epsilon_{i} \overset{iid}\sim N(0,\sigma^2)$$
+
+```{r finalmodel, echo=FALSE, comment=NA, include=TRUE, warning=FALSE, message=FALSE, out.width="45%",fig.align = "default"}
+kable(tidy(reg2), "latex",caption = "Final Model Summary",booktabs = T,linesep = "") %>% 
+kable_styling(position = "center",latex_options = "hold_position")%>% 
+kable_styling(latex_options = c("repeat_header"))%>% 
+column_spec(1, width = "4cm")
+```
+
+
+# Results
+
+In the final logistic regression, the baseline is an player in a squad team who gives no assists, no revives to teammates, and also do not kill teammates, who have average number of all numeric game statistics who will have probability of 2.9% of getting into top ten percentile ("winning"). 
+
+Holding all other variables constant, having one or more assists to teammates increases the winning odds by 104%. Holding all other variables constant, having revived knocked-down teammates increases the odds of winning by 90%. While on the other hand, if the player chooses to kill one or more his or her teammates, then the odds of winning decreases by 44%. These suggest that taking the effort and risk to help teammates is worthwhile and team cooperation is essential for the group to success.
+
+Regarding medicines, with one unit more healing item used compared to average, the winning chances decreases by 6%. As healing items are only useful when receiving damages causing HP lower than 75%. Using more healing items suggests more damage experienced for the player and that other players are out winning. On the other hand, boosting items are able to recover HP and at the same time provide movement speedup within a short period of time. With each additional boosting item taken compared to average, the chance of winning increases by 85%. 
+
+With each additional weapon obtained compared to average, the winning odds increases by 16%. With every extra enemy killed or knocked down compared to average, the winning odds increases by 8%. Apart from trying to gain advantages by possessing more weapons and being aggressive to have more kills, with each unit increase in accuracy of headshots, the winning odds increases by 75%. Regarding the interaction term, given the player provides assists to teammates, with each extra kill or knocked down with respect to average number, the odds of winning increases by 20% compared to baseline. Naturally if the player provides help teammates, they are all able to survive longer, and eventually contribute to team victory.
+
+
+
+# Assessment
+
+```{r confmat, echo=F, include=F, eval=F, message=F, warning=F, out.width='60%', fig.align='center'}
+Conf_mat_df <- confusionMatrix(as.factor(ifelse(predict(reg2,type="response",newdata=df)>0.3,"1","0")),as.factor(df$outcome),positive = "1")
+# Conf_mat$table
+Conf_mat_df$overall["Accuracy"]
+Conf_mat_df$byClass[c("Sensitivity","Specificity")]
+roc(df$outcome,predict(reg2,type="response",newdata=df),plot=T,print.thres="best",legacy.axes=T,print.auc =T,col="red3")
+
+# Conf_mat_test <- confusionMatrix(as.factor(ifelse(predict(reg2,type="response",newdata=test)>0.3,"1","0")),as.factor(test$outcome),positive = "1")
+# # Conf_mat$table
+# Conf_mat_test$overall["Accuracy"]
+# Conf_mat_test$byClass[c("Sensitivity","Specificity")]
+# roc(test$outcome,predict(reg2,type="response",newdata=test),plot=T,print.thres="best",legacy.axes=T,print.auc =T,col="red3")
+```
+
+By checking with variance inflation factors, the covariates in the final model do not have multicolinearity issue. The confusion matrix is defined for the model. With threshold being 0.3, the model accuracy is 89.4% while sensitivity is 55.0% and specificity is 93.8%. The reason behind adjusting to a lower threshold is that as the data itself is imbalanced with around 11% records making into top ten percentile in different matches, the model is not able to predict the true positives very well but can highly accurate predicting true negatives. The model has a rate of 89.6% (AUC) of successful classification. Finally, k-fold cross validation with k=10 was conducted, which validated model's overal predictive ability with an AUC value of 89.5%.
+
+```{r binResid, echo=F, include=F, out.width='90%', fig.align='center', message=F, warning=F, comment=NA}
+par(mfrow=c(2,3))
+binnedplot(x=fitted(reg2),y=residuals(reg2,"resp"),xlab="Pred. probabilities",
+           col.int="red4",ylab="Avg. residuals",main="fitted",col.pts="navy")
+
+# for covariate - killsanndknockedc
+binnedplot(x=df$killsandknockedc,y=residuals(reg2,"resp"),xlab="killsanndknockedc",
+           col.int="red4",ylab="Avg. residuals",main = NA,col.pts="navy")
+
+# for covariate - headshot_ratec
+binnedplot(x=df$headshot_ratec,y=residuals(reg2,"resp"),xlab="headshot_ratec",
+           col.int="red4",ylab="Avg. residuals",main = NA,col.pts="navy")
+
+# for covariate - healsc
+binnedplot(x=df$healsc,y=residuals(reg2,"resp"),xlab="healsc",
+           col.int="red4",ylab="Avg. residuals",main = NA,col.pts="navy")
+
+# for covariate - boostsc
+binnedplot(x=df$boostsc,y=residuals(reg2,"resp"),xlab="boostsc",
+           col.int="red4",ylab="Avg. residuals",main = NA,col.pts="navy")
+
+# for covariate - weaponsAcquiredc
+binnedplot(x=df$weaponsAcquiredc,y=residuals(reg2,"resp"),xlab="weaponsAcquiredc",
+           col.int="red4",ylab="Avg. residuals",main = NA,col.pts="navy")
+```
+
+From binned residual plots of fitted values, there seems to have a downward trend suggesting the model is somewhat limited at predicting the true positives and there might exist some other relationships which were not captured. In addition, there are some outliers falling outside the error bounds for *boostsc*. Transformations on this predictor were attempted such as square, square root, cubic, logarithm, etc. However, the residual plot did not seem to improve with persisting outliers lying at low and high-end values. This is included as part of the model limitations.
+
+
+# Conclusion
+
+In conclusion, in squad team plays, team cooperation is vitally important. Giving one or more assists or revives knocked-down teammates increases the odds of winning a lot given all other variables constant. Naturally if the player chooses to kill teammates instead the odds of the group winning decreases. Given the player provides assists to teammates, they are able to survive longer and giving full strength, and the effect of each extra kills or knocked-down enemies on the winning odds is increased. 
+
+In addition, it might be better to have a more aggressive playing style compared to the "safe" way of hiding and avoiding conflicts, as a greater number of kills and knocked-down enemies compared to average increases the odds of winning. Practicing shooting accuracy in general will be a good idea as higher headshot accuracy compared to average player increases the odds of winning as well. In PUBG, the players expose their locations when shooting, therefore, it is good strategy to make shots count and worthwhile by having higher shooting accuracy. Also, as every additional weapon possessed compared to average increases the odds of winning, it is good game plan to gain as much advantages as possible by scavenging for a greater number of weapons. 
+
+When it comes to the use of medic items, the more boosting items taken compared to average increases the odds of winning. Compared to healing items which are only useful to recover health once suffered from damage and health below 75%, boosting items are the only way to regenerate health above 75% and able to provide movement speedups at the same time within certain time limit. In practice, taking boosts until a full boost bar is useful to get fully prepared particularly when it comes to the last few people.
+
+
+# Limitation
+
+Regarding the data used for analysis, there is imbalanced outcome data variables given the nature of the survival game, which means most of the population is non-winning and only a few gets to the top. This results in limited ability for the model to predict the true positives (relatively low sensitivity) but high accuracy in predicting true negatives (high specificity). In addition, the binned residual plots show that there are some outliers the model fails to capture (e.g. *boostsc*). As attempted transformation on the predictors did not show improvements, there might exist some other relationships than logistics which is hard to infer from given information. 
+
+There was also every uneven available data for each category for some of the binary predictors, for example, there are mostly 0s in *teamKills* as most players tend not to kill teammates. This could make it hard to draw co-relations such as whether there was influence from one binary predictor on the odds of winning or simply such relationship was wrongly deducted from the biased data available. 
+
+During data processing, by remapping continuous variables given into binary variables, information of the effect of each increase level was lost, hence the final model is unable to interpret the effect of having each additional unit of assists, revives, etc. on the odds of winning. Further, the dataset used was obtained by aggregation of each team by each match, which may not be fully representative statistics for an individual player in a squad team. Also, cheaters commonly exist in games and there might be other ways to cheat which are not accounted for. For example, players with 100% headshot kills were not removed in the dataset given the benefit of doubt that they are simply extremely good players. However, if they are actually cheaters, by aggregating based on each group of each match and taking the average statistics, cheaters' outstanding suspicious data will distort the end analysis result.
+
+Finally, there are many nuances and external factors for each predictor present in the model in practice. For medical items, there are different types of healing and boosting items with each having different effects depending on both health bar and boost bar. Apart from number of kills and enemies knocked down, it would be interesting to look at different ways of giving damage, for example, the type of weapons (gun type, equipped or not, etc.).
+
+
+* * *
+
+# Appendix
+
+link to github repository:
+
+https://github.com/becky-yc/pubg
+
+```{r EDAbinplots, echo=F, include=T, eval=T}
+```
+```{r EDAboxplots, echo=F, include=T, eval=T}
+```
+```{r corr, echo=F,include=T,eval=T, warning = F, message=F, comment=NA}
+```
+```{r confmat, echo=F, include=T, eval=T, message=F, warning=F, comment = NA, out.width='70%', fig.align='center'}
+```
+```{r binResid, echo=F, include=T, eval=T, message=F, warning=F, out.width='100%', fig.align='center'}
+```
+```{r logi_cross_valid, message=F, warning=F,echo=F, include=F, eval=F}
+df_k = df
+set.seed(123) # use whatever number you want
+# Now randomly re-shuffle the data
+df_k <- df_k[sample(nrow(df_k)),]
+# Define the number of folds you want
+K <- 10
+# Define a matrix to save your results into
+aucm <- matrix(0,nrow=K,ncol=1)
+# Split the row indexes into k equal parts
+kth_fold <- cut(seq(1,nrow(df_k)),breaks=K,labels=FALSE)
+
+for(k in 1:K){
+    # Split data into the df and test datasets
+    test_index <- which(kth_fold==k)
+    train_k <- df_k[-test_index,]
+    test_k <- df_k[test_index,]
+    reg_train <- glm(reg2$formula,data=train_k,family=binomial(link = 'logit'))
+    pred_test <- predict(reg_train, test_k)
+    rocc <- roc(test_k$outcome, pred_test, plot=T,print.thres="best",legacy.axes=T,print.auc=T,col="red3")
+    aucm[k,] <- rocc$auc[1] 
+}
+
+avg_auc <- mean(aucm) 
+avg_auc #  0.899492
+#Using k-fold cross validation (k=10) on the original processed dataset before the initial split,the final model has 0.95 mean AUC value using average AUC as the metric for quantifying predictive error, which proves its out-of-sample predictive ability.
+```
+```{r rf, echo=F, include=F, eval=F, include=F}
+#############RANDOM FOREST###############
+reg_rf <- randomForest(as.factor(outcome) ~ assists_bi + healsc + boostsc + revives_bi + 
+    teamKills_bi + roadKills_bi + weaponsAcquiredc + killsandknockedc + 
+    numGroups + totalDistancec + headshot_ratec, data = train, importance =TRUE)
+varImpPlot(reg_rf)
+#MeanDecreaseAccuracy: mean decrease of accuracy in predictions when the variable is excluded.
+#MeanDecreaseGini: measure of total decrease in node impurity that results from splits over that variable, averaged over all trees
+#importance(train_rf)
+
+# train
+Conf_mat_rf <- confusionMatrix(predict(reg_rf),as.factor(train$outcome),positive = "1")
+Conf_mat_rf$table
+Conf_mat_rf$overall["Accuracy"]
+Conf_mat_rf$byClass[c("Sensitivity","Specificity")]
+roc(train$outcome,predict(reg_rf,type="prob")[,2],plot=T,print.thres="best",legacy.axes=T,print.auc =T,col="red3")
+
+# test
+pred_test = predict(reg_rf, newdata = test, type = "prob")
+Conf_mat_rf_test <- confusionMatrix(as.factor(ifelse(pred_test[,2] >= 0.5, "1","0")),as.factor(test$outcome),positive = "1")
+Conf_mat_rf_test$overall["Accuracy"]
+Conf_mat_rf_test$byClass[c("Sensitivity","Specificity")]
+roc(test$outcome,pred_test[,2],plot=T,print.thres="best",legacy.axes=T,print.auc =T,col="red3")
+
+#############BOOSTING#################
+reg_boost <-  gbm(outcome ~ assists_bi + healsc + boostsc + revives_bi + 
+    teamKills_bi + roadKills_bi + weaponsAcquiredc + killsandknockedc + 
+    numGroups + totalDistancec + headshot_ratec,
+    data=train,distribution="bernoulli",n.trees=5000,interaction.depth=2)
+summary(reg_boost)
+
+#reduce the number of trees and lamba, then try again
+reg_boost2 <-  gbm(outcome ~ assists_bi + healsc + boostsc + revives_bi + 
+    teamKills_bi + roadKills_bi + weaponsAcquiredc + killsandknockedc + 
+    numGroups + totalDistancec + headshot_ratec, 
+    data=train, shrinkage = 0.01, distribution="bernoulli",n.trees=500, interaction.depth=2) # shrinkage smaller means model learns slower
+summary(reg_boost2)
+
+pred_prob_boost <- predict(reg_boost2,n.trees=500,type="response")
+Conf_boost <- confusionMatrix(as.factor(ifelse(pred_prob_boost >= 0.5, "1","0")),
+                              as.factor(train$outcome),positive = "1")
+Conf_boost$table
+Conf_boost$overall["Accuracy"]
+Conf_boost$byClass[c("Sensitivity","Specificity")]
+roc(train$outcome,pred_prob_boost,
+    plot=T,print.thres="best",legacy.axes=T,print.auc =T,col="red3")
+
+# test set
+pred_prob_boost_test <- predict(reg_boost2,n.trees=500,type="response",newdata=test)
+Conf_boost_test <- confusionMatrix(as.factor(ifelse(pred_prob_boost_test >= 0.5, "1","0")),
+                              as.factor(test$outcome),positive = "1")
+Conf_boost_test$table
+Conf_boost_test$overall["Accuracy"]
+Conf_boost_test$byClass[c("Sensitivity","Specificity")]
+roc(test$outcome,pred_prob_boost_test,
+    plot=T,print.thres="best",legacy.axes=T,print.auc =T,col="red3")
+
+```
+
